@@ -72,6 +72,16 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
+# variables needed for scaling laws
+scaling = "" # takes 4 values: Kaplan, Chinchilla-1, Chinchilla-2 or '' (default, when not scaling).
+scale_N = False 
+scale_D = False 
+estimate_B_crit = False
+N = 12 * n_layer * n_embd**2 # number of non-embedding parameters
+fraction_of_data = 1.0 # fraction of OWT dataset that will be used for training
+D = int(fraction_of_data*9035582198) # number of OWT dataset tokens
+wandb_run_id = "" # needed only if resuming a W&B run. 
+
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -113,13 +123,13 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
+train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+if scaling == 'Kaplan' and scale_D: # use a fraction of dataset if scaling with dataset size following Kaplan et al
+    train_data = train_data[:D]
+    print(f"Using {fraction_of_data} fraction of owt training data; number of tokens: {D:.2e}")
+val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
 def get_batch(split):
-    # We recreate np.memmap every batch to avoid a memory leak, as per
-    # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
-    if split == 'train':
-        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
-    else:
-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+    data = train_data if split == 'train' else val_data
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
@@ -231,7 +241,7 @@ def estimate_loss():
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_iters:
-        return learning_rate * (it + 1) / (warmup_iters + 1)
+        return learning_rate * it / warmup_iters
     # 2) if it > lr_decay_iters, return min learning rate
     if it > lr_decay_iters:
         return min_lr
@@ -244,7 +254,10 @@ def get_lr(it):
 # logging
 if wandb_log and master_process:
     import wandb
-    wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    if wandb_run_id: # resume a previous run with id=wandb_run_id
+        wandb.init(project=wandb_project, id=wandb_run_id, resume="must")
+    else:
+        wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
@@ -260,7 +273,8 @@ while True:
         param_group['lr'] = lr
 
     # evaluate the loss on train/val sets and write checkpoints
-    if iter_num % eval_interval == 0 and master_process:
+    # except when estimating critical batch size or reproducing Chinchilla scaling laws as they work with (smoothed) training loss
+    if iter_num % eval_interval == 0 and master_process and not (estimate_B_crit or scale_D == 'Chinchilla'):
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
@@ -325,6 +339,13 @@ while True:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+
+        if (estimate_B_crit or scale_D == 'Chinchilla') and wandb_log:
+            wandb.log({
+                "iter": iter_num,
+                "iter_loss": lossf,
+                "lr": lr,
+            })
     iter_num += 1
     local_iter_num += 1
 
