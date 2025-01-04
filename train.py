@@ -21,6 +21,7 @@ import time
 import math
 import pickle
 from contextlib import nullcontext
+import pandas as pd
 
 import numpy as np
 import torch
@@ -165,6 +166,7 @@ if init_from == 'scratch':
     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
+    print(f"total iterations: {max_iters}")
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
@@ -265,6 +267,9 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
+
+train_loss_records = []
+
 while True:
 
     # determine and set the learning rate for this iteration
@@ -340,6 +345,8 @@ while True:
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
 
+        train_loss_records.append((iter_num, lossf))
+
         if (estimate_B_crit or scale_D == 'Chinchilla') and wandb_log:
             wandb.log({
                 "iter": iter_num,
@@ -355,3 +362,7 @@ while True:
 
 if ddp:
     destroy_process_group()
+
+if master_process:
+    df_train_loss = pd.DataFrame(train_loss_records, columns=["step", "loss"])
+    df_train_loss.to_csv(os.path.join(out_dir, "train_loss_records.csv"), index=False)
