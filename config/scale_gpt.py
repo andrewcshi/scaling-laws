@@ -1,5 +1,5 @@
 wandb_log = True
-wandb_project = 'owt-scaling'
+wandb_project = 'owt-scaling-shape'
 wandb_run_id = "" # give only when resuming a W&B run
 always_save_checkpoint = False 
 
@@ -9,8 +9,8 @@ scale_N = False
 scale_D = False
 
 # replace n_layer, n_embd and fraction_of_data from command line. Default values:
-n_layer = 4
-n_embd = 64
+n_layer = 1
+n_embd = 128
 fraction_of_data = 1.0
 
 # Can also set n_head from command line, but set default value through this rule of thumb 
@@ -21,7 +21,7 @@ n_head = 4
 #### TRAINING CONFIGURATIONS FROM KAPLAN ET AL
 
 # total batch size = 512 so set local batch size = 16, gradaccum = 32 
-batch_size = 32
+batch_size = 16
 block_size = 256
 gradient_accumulation_steps = 4 * 8
 
@@ -37,7 +37,7 @@ min_lr = 0
 
 # eval stuff same as nanoGPT
 eval_interval = 50
-eval_iters = 200
+eval_iters = 500
 log_interval = 1
 
 # weight decay same as nanoGPT
