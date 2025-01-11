@@ -4,6 +4,7 @@ import math
 import pickle
 from contextlib import nullcontext
 import pandas as pd
+import re
 
 import numpy as np
 import torch
@@ -63,16 +64,20 @@ config = {k: globals()[k] for k in config_keys}
 def get_flop_per_token(num_embd, num_layers):
     return 6 * 12 * num_embd**2 * num_layers
 
-def run_single_train(n_layer_val, n_embd_val, run_idx=0, total_runs=1):
+def run_single_train(n_layer_val, n_embd_val, block_size_val, run_idx=0, total_runs=1):
     global n_layer, n_embd, D, out_dir, wandb_run_name
     global n_head
+    global block_size
 
     # override
     n_layer = n_layer_val
     n_embd = n_embd_val
+    block_size = block_size_val
 
-    # CHANGED: Removed the suffix so we do NOT append run # anymore.
+    # file naming
     if total_runs > 1:
+        suffix_pattern = re.compile(r'_run\d+_of_\d+$')
+        out_dir = suffix_pattern.sub('', out_dir)
         suffix = f"_run{run_idx+1}_of_{total_runs}"
         out_dir = out_dir + suffix
 
@@ -228,7 +233,7 @@ def run_single_train(n_layer_val, n_embd_val, run_idx=0, total_runs=1):
     # CHANGED: Since we removed suffix, wandb name can still have run info:
     if wandb_log and master_process:
         import wandb
-        wandb_name = f"{n_layer_val}l-{n_embd_val}e-{n_head}a-{num_parameters}p-r{run_idx+1}/{total_runs}"
+        wandb_name = f"{block_size}c-{num_parameters}p-r{run_idx+1}/{total_runs}"
         wandb.init(project=wandb_project, name=wandb_name, config=config, reinit=True)
 
     Xb, Yb = get_batch('train')
@@ -237,6 +242,7 @@ def run_single_train(n_layer_val, n_embd_val, run_idx=0, total_runs=1):
     raw_model = model.module if ddp else model
     running_mfu = -1.0
     train_loss_records = []
+    val_loss_records = []
 
     while True:
         lr_ = get_lr(iter_num) if decay_lr else learning_rate
@@ -246,6 +252,7 @@ def run_single_train(n_layer_val, n_embd_val, run_idx=0, total_runs=1):
         if iter_num % eval_interval == 0 and master_process and not (estimate_B_crit or scale_D == 'Chinchilla'):
             losses = estimate_loss()
             print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            val_loss_records.append((iter_num, losses['val'], total_flops))
             if wandb_log:
                 import wandb
                 wandb.log({
@@ -315,6 +322,9 @@ def run_single_train(n_layer_val, n_embd_val, run_idx=0, total_runs=1):
     if master_process:
         df_train = pd.DataFrame(train_loss_records, columns=["step","loss","flops"])
         df_train.to_csv(os.path.join(out_dir, "train_loss_records.csv"), index=False)
+        if len(val_loss_records) > 0:
+            df_val = pd.DataFrame(val_loss_records, columns=["step","loss","flops"])
+            df_val.to_csv(os.path.join(out_dir, "val_loss_records.csv"), index=False)
 
 # multiple runs logic
 if isinstance(n_layer, list) or isinstance(n_embd, list):
@@ -326,17 +336,20 @@ if isinstance(n_layer, list) or isinstance(n_embd, list):
         embd_list = n_embd
     else:
         embd_list = [n_embd]
+    
+    if isinstance(block_size, list):
+        block_size_list = block_size
+    else:
+        block_size_list = [block_size]
 
     combos = []
     for ln in layer_list:
         for em in embd_list:
-            combos.append((ln, em))
-
-    # uncomment if starting from specific run number
-    for i, (ln_val, em_val) in enumerate(combos):
-        if i < 20:
-            continue
-        run_single_train(ln_val, em_val, run_idx=i, total_runs=len(combos))
+            for bs in block_size_list:
+                combos.append((ln, em, bs))
+  
+    for i, (ln_val, em_val, bs_val) in enumerate(combos):
+        run_single_train(ln_val, em_val, bs_val, run_idx=i, total_runs=len(combos))
 
 else:
-    run_single_train(n_layer, n_embd, run_idx=0, total_runs=1)
+    run_single_train(n_layer, n_embd, block_size, run_idx=0, total_runs=1)

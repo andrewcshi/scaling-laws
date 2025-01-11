@@ -1,5 +1,5 @@
 wandb_log = True
-wandb_project = 'owt-scaling-shape'
+wandb_project = 'owt-scaling-context'
 wandb_run_id = "" # give only when resuming a W&B run
 always_save_checkpoint = False 
 
