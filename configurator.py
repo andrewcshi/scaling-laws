@@ -38,9 +38,6 @@ for arg in sys.argv[1:]:
             except (SyntaxError, ValueError):
                 # if that goes wrong, just use the string
                 attempt = val
-            # ensure the types match ok
-            assert type(attempt) == type(globals()[key])
-            # cross fingers
             print(f"Overriding: {key} = {attempt}")
             globals()[key] = attempt
         else:
@@ -52,23 +49,21 @@ assert scaling in ['', 'Kaplan', 'Chinchilla-1', 'Chinchilla-2'], "invalid scali
 
 if scaling == 'Kaplan':
     import math
-    # retrieve scale_N, scale_D, estimate_B_crit from globals(); assert that at least one of them is True when scaling=Kaplan
     scale_N, scale_D, estimate_B_crit = globals()['scale_N'], globals()['scale_D'], globals()['estimate_B_crit']
-    assert scale_N or scale_D or estimate_B_crit, "at least one of scale_N, scale_D, or estimate_B_crit must be True when scaling=Kaplan."
-    
-    # retrieve n_layer, n_embd, fraction_of_data; and compute N and D
-    n_layer, n_embd, fraction_of_data = globals()['n_layer'], globals()['n_embd'], globals()['fraction_of_data']
-    N = 12 * n_layer * n_embd**2 
-    D = int(fraction_of_data * 9035582198)
-    
-    # Set learning rate, wandb-run-name and out-dir name; these depend on N and/or D
-    if scale_N or scale_D:
-        learning_rate =  0.003239 - 0.0001395 * math.log(N) # use equation D.1 of Kaplan et al to set maximum learning rate
-        wandb_run_name = f'D-{D:.2e}-N-{N:.2e}' if scale_D else f'N-{N:.2e}'
-    else: # when estimating critical batch size, learning rate is set by hand so we do not need to compute it
-        wandb_run_name = f"N-{N:.2e}-batch-{globals()['batch_size']*globals()['gradient_accumulation_steps']}-lr-{globals()['learning_rate']}"
-    
-    out_dir = 'out-'+wandb_run_name
+    if scale_N or scale_D or estimate_B_crit:
+        n_layer, n_embd, fraction_of_data = globals()['n_layer'], globals()['n_embd'], globals()['fraction_of_data']
+        N = 12 * (n_layer if isinstance(n_layer, int) else max(n_layer)) * (n_embd if isinstance(n_embd, int) else max(n_embd))**2 
+        D = int(fraction_of_data * 9035582198)
 
+        if scale_N or scale_D:
+            learning_rate =  0.003239 - 0.0001395 * math.log(N)
+            wandb_run_name = f'D-{D:.2e}-N-{N:.2e}' if scale_D else f'N-{N:.2e}'
+        else:
+            wandb_run_name = f"N-{N:.2e}-batch-{globals()['batch_size']*globals()['gradient_accumulation_steps']}-lr-{globals()['learning_rate']}"
+
+        out_dir = 'out-'+wandb_run_name
+        globals()['learning_rate'] = learning_rate
+        globals()['wandb_run_name'] = wandb_run_name
+        globals()['out_dir'] = out_dir
 elif scaling == 'Chinchilla-1' or scaling == 'Chinchilla-2':
     raise NotImplementedError("work in progress")
