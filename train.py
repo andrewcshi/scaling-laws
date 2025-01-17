@@ -13,6 +13,8 @@ from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
 
+import wandb
+
 # ---------------------------------------------------------------------
 # default config
 out_dir = 'out'
@@ -64,7 +66,7 @@ config = {k: globals()[k] for k in config_keys}
 def get_flop_per_token(num_embd, num_layers):
     return 6 * 12 * num_embd**2 * num_layers
 
-def run_single_train(n_layer_val, n_embd_val, block_size_val, run_idx=0, total_runs=1):
+def train(n_layer_val, n_embd_val, block_size_val, run_idx=0, total_runs=1):
     global n_layer, n_embd, D, out_dir, wandb_run_name
     global n_head
     global block_size
@@ -104,7 +106,7 @@ def run_single_train(n_layer_val, n_embd_val, block_size_val, run_idx=0, total_r
         actual_grad_steps = gradient_accumulation_steps
 
     tokens_per_iter = actual_grad_steps * ddp_world_size * batch_size * block_size
-    print(f"\n=== Starting run {run_idx+1}/{total_runs} with n_layer={n_layer}, n_embd={n_embd} ===")
+    print(f"\n=== Starting run {run_idx+1}/{total_runs} with n_layer={n_layer}, n_embd={n_embd}, context={block_size} ===")
     print(f"tokens per iteration: {tokens_per_iter}")
     if master_process:
         os.makedirs(out_dir, exist_ok=True)
@@ -227,14 +229,12 @@ def run_single_train(n_layer_val, n_embd_val, block_size_val, run_idx=0, total_r
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
         return min_lr + coeff * (learning_rate - min_lr)
 
-    # CHANGED: Retrieve number of params from model.py
     num_parameters = model.get_num_params(non_embedding=True)
 
-    # CHANGED: Since we removed suffix, wandb name can still have run info:
     if wandb_log and master_process:
-        import wandb
-        wandb_name = f"{block_size}c-{num_parameters}p-r{run_idx+1}/{total_runs}"
-        wandb.init(project=wandb_project, name=wandb_name, config=config, reinit=True)
+        valid_project = re.sub(r'[\/\\#\?%:]+', '_', wandb_project)
+        wandb_name = f"{block_size}c-{num_parameters}p-r{run_idx+1}_{total_runs}"
+        wandb.init(project=valid_project, name=wandb_name, config=config, reinit=True)
 
     Xb, Yb = get_batch('train')
     t0 = time.time()
@@ -254,7 +254,6 @@ def run_single_train(n_layer_val, n_embd_val, block_size_val, run_idx=0, total_r
             print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
             val_loss_records.append((iter_num, losses['val'], total_flops))
             if wandb_log:
-                import wandb
                 wandb.log({
                     "iter": iter_num,
                     "train/loss": losses['train'],
@@ -315,7 +314,6 @@ def run_single_train(n_layer_val, n_embd_val, block_size_val, run_idx=0, total_r
         destroy_process_group()
 
     if wandb_log and master_process:
-        import wandb
         wandb.finish()
 
     # Save final training curve to CSV
@@ -349,7 +347,9 @@ if isinstance(n_layer, list) or isinstance(n_embd, list):
                 combos.append((ln, em, bs))
   
     for i, (ln_val, em_val, bs_val) in enumerate(combos):
-        run_single_train(ln_val, em_val, bs_val, run_idx=i, total_runs=len(combos))
+        if i < 16:
+            continue
+        train(ln_val, em_val, bs_val, run_idx=i, total_runs=len(combos))
 
 else:
-    run_single_train(n_layer, n_embd, block_size, run_idx=0, total_runs=1)
+    train(n_layer, n_embd, block_size, run_idx=0, total_runs=1)
